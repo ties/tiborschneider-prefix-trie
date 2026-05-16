@@ -7,6 +7,7 @@ const ITERS: usize = 100_000;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use ip_network_table_deps_treebitmap::IpLookupTable;
 use ipnet::Ipv4Net;
+use iptrie::IpRTrieMap;
 use itertools::Itertools;
 use prefix_trie::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -36,7 +37,22 @@ macro_rules! bench_all {
         bench_one!($group, IpLookupTable<Ipv4Addr, u32>, |$s| $setup, |$r| $run);
         bench_one!($group, HashMap<Ipv4Net, u32>, |$s| $setup, |$r| $run);
         bench_one!($group, BTreeMap<Ipv4Net, u32>, |$s| $setup, |$r| $run);
+        bench_one!($group, IpRTrieMap<u32>, |$s| $setup, |$r| $run);
     };
+}
+
+macro_rules! bench_lookup_only {
+    ($group:expr, $setup:expr, $lookups:expr) => {{
+        $group.bench_function("IpLCTrieMap", |b| {
+            b.iter_with_setup(
+                || build_ip_lc_trie_map($setup),
+                |m| {
+                    execute_ip_lc_lookups(&m, $lookups);
+                    m
+                },
+            )
+        });
+    }};
 }
 
 pub fn random_mods(c: &mut Criterion) {
@@ -57,6 +73,7 @@ pub fn random_lookup(c: &mut Criterion) {
     bench_all!(group, |m| execute(&mut m, &mods), |m| execute(
         &mut m, &lookups
     ));
+    bench_lookup_only!(group, &mods, &lookups);
     group.finish();
 }
 
@@ -83,6 +100,7 @@ pub fn bgp_lookup_random(c: &mut Criterion) {
     bench_all!(group, |m| execute(&mut m, &mods), |m| execute(
         &mut m, &lookups
     ));
+    bench_lookup_only!(group, &mods, &lookups);
     group.finish();
 }
 
@@ -104,6 +122,7 @@ pub fn bgp_lookup_ris(c: &mut Criterion) {
     bench_all!(group, |m| execute(&mut m, &mods), |m| execute(
         &mut m, &lookups
     ));
+    bench_lookup_only!(group, &mods, &lookups);
     group.finish();
 }
 

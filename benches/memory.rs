@@ -3,6 +3,7 @@ use common::*;
 
 use ip_network_table_deps_treebitmap::IpLookupTable;
 use ipnet::Ipv4Net;
+use iptrie::IpRTrieMap;
 use prefix_trie::*;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,6 +64,14 @@ fn dense_memory_usage() {
         m
     });
 
+    let (_, iprtriemap_mem) = measure_alloc(|| {
+        let mut m = IpRTrieMap::new();
+        execute(&mut m, &mods);
+        m
+    });
+
+    let (_, iplctriemap_mem) = measure_alloc(|| build_ip_lc_trie_map(&mods));
+
     println!("elements:   {}", addrs.len());
     println!(
         "PrefixSet:  {:.3} mB",
@@ -80,5 +89,13 @@ fn dense_memory_usage() {
     println!(
         "BTreeMap:   {:.3} mB",
         btreemap_mem as f64 / 1024.0 / 1024.0
+    );
+    println!(
+        "IpRTrieMap: {:.3} mB",
+        iprtriemap_mem as f64 / 1024.0 / 1024.0
+    );
+    println!(
+        "IpLCTrieMap: {:.3} mB",
+        iplctriemap_mem as f64 / 1024.0 / 1024.0
     );
 }

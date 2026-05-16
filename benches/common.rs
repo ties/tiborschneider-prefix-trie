@@ -2,7 +2,8 @@
 #![allow(clippy::incompatible_msrv)]
 
 use ip_network_table_deps_treebitmap::IpLookupTable;
-use ipnet::Ipv4Net;
+use ipnet::{IpNet, Ipv4Net};
+use iptrie::{IpLCTrieMap, IpRTrieMap};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
 use prefix_trie::*;
@@ -32,7 +33,9 @@ pub trait BenchMap: Sized {
 
 impl BenchMap for PrefixMap<Ipv4Net, u32> {
     const NAME: &'static str = "PrefixMap";
-    fn new_empty() -> Self { PrefixMap::new() }
+    fn new_empty() -> Self {
+        PrefixMap::new()
+    }
     fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
         self.insert(Ipv4Net::new(addr, len).unwrap(), val);
     }
@@ -46,7 +49,9 @@ impl BenchMap for PrefixMap<Ipv4Net, u32> {
 
 impl BenchMap for IpLookupTable<Ipv4Addr, u32> {
     const NAME: &'static str = "TreeBitMap";
-    fn new_empty() -> Self { IpLookupTable::new() }
+    fn new_empty() -> Self {
+        IpLookupTable::new()
+    }
     fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
         self.insert(addr, len as u32, val);
     }
@@ -60,7 +65,9 @@ impl BenchMap for IpLookupTable<Ipv4Addr, u32> {
 
 impl BenchMap for HashMap<Ipv4Net, u32> {
     const NAME: &'static str = "HashMap";
-    fn new_empty() -> Self { HashMap::new() }
+    fn new_empty() -> Self {
+        HashMap::new()
+    }
     fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
         self.insert(Ipv4Net::new(addr, len).unwrap(), val);
     }
@@ -74,7 +81,9 @@ impl BenchMap for HashMap<Ipv4Net, u32> {
 
 impl BenchMap for BTreeMap<Ipv4Net, u32> {
     const NAME: &'static str = "BTreeMap";
-    fn new_empty() -> Self { BTreeMap::new() }
+    fn new_empty() -> Self {
+        BTreeMap::new()
+    }
     fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
         self.insert(Ipv4Net::new(addr, len).unwrap(), val);
     }
@@ -83,6 +92,23 @@ impl BenchMap for BTreeMap<Ipv4Net, u32> {
     }
     fn exact_match(&self, addr: Ipv4Addr, len: u8) -> Option<u32> {
         self.get(&Ipv4Net::new(addr, len).unwrap()).copied()
+    }
+}
+
+impl BenchMap for IpRTrieMap<u32> {
+    const NAME: &'static str = "IpRTrieMap";
+    fn new_empty() -> Self {
+        IpRTrieMap::new()
+    }
+    fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
+        self.insert(IpNet::V4(Ipv4Net::new(addr, len).unwrap()), val);
+    }
+    fn remove(&mut self, addr: Ipv4Addr, len: u8) {
+        self.remove(&IpNet::V4(Ipv4Net::new(addr, len).unwrap()));
+    }
+    fn exact_match(&self, addr: Ipv4Addr, len: u8) -> Option<u32> {
+        self.get(&IpNet::V4(Ipv4Net::new(addr, len).unwrap()))
+            .copied()
     }
 }
 
@@ -99,6 +125,23 @@ pub fn execute<M: BenchMap>(map: &mut M, insns: &[Insn]) {
             }
             Insn::ExactMatch(addr, len) => map.exact_match(*addr, *len),
         });
+    }
+}
+
+pub fn build_ip_lc_trie_map(insns: &[Insn]) -> IpLCTrieMap<u32> {
+    let mut map = IpRTrieMap::new();
+    execute(&mut map, insns);
+    map.compress()
+}
+
+pub fn execute_ip_lc_lookups(map: &IpLCTrieMap<u32>, insns: &[Insn]) {
+    for insn in insns {
+        let Insn::ExactMatch(addr, len) = insn else {
+            panic!("IpLCTrieMap lookup benchmarks only accept exact-match instructions");
+        };
+        // Keep the borrowed result here so the benchmark measures IpLCTrieMap's lookup path without
+        // an additional copy.
+        std::hint::black_box(map.get(&IpNet::V4(Ipv4Net::new(*addr, *len).unwrap())));
     }
 }
 
