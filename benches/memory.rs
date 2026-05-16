@@ -2,13 +2,16 @@ mod common;
 use common::*;
 
 use ip_network_table_deps_treebitmap::IpLookupTable;
-use ipnet::Ipv4Net;
-use iptrie::IpRTrieMap;
+use ipnet::{Ipv4Net, Ipv6Net};
+use iptrie::map::RTrieMap;
 use prefix_trie::*;
 use std::collections::{BTreeMap, HashMap};
+use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+static MEASURE_LOCK: Mutex<()> = Mutex::new(());
 
 struct TrackingAllocator;
 
@@ -33,46 +36,19 @@ fn measure_alloc<T>(f: impl FnOnce() -> T) -> (T, usize) {
     (val, after - before)
 }
 
-#[test]
-fn dense_memory_usage() {
-    let addrs = ris_peer_initial_state(0);
-    let mods = fill_table(0, &addrs);
-
-    let (m, prefixmap_mem) = measure_alloc(|| {
-        let mut m = PrefixMap::new();
-        execute(&mut m, &mods);
-        m
-    });
-
-    let (_, prefixset_mem) = measure_alloc(|| m.iter().map(|(p, _)| p).collect::<PrefixSet<_>>());
-
-    let (_, treebitmap_mem) = measure_alloc(|| {
-        let mut m = IpLookupTable::new();
-        execute(&mut m, &mods);
-        m
-    });
-
-    let (_, hashmap_mem) = measure_alloc(|| {
-        let mut m: HashMap<Ipv4Net, u32> = HashMap::new();
-        execute(&mut m, &mods);
-        m
-    });
-
-    let (_, btreemap_mem) = measure_alloc(|| {
-        let mut m: BTreeMap<Ipv4Net, u32> = BTreeMap::new();
-        execute(&mut m, &mods);
-        m
-    });
-
-    let (_, iprtriemap_mem) = measure_alloc(|| {
-        let mut m = IpRTrieMap::new();
-        execute(&mut m, &mods);
-        m
-    });
-
-    let (_, iplctriemap_mem) = measure_alloc(|| build_ip_lc_trie_map(&mods));
-
-    println!("elements:   {}", addrs.len());
+fn print_memory_usage(
+    family: &str,
+    elements: usize,
+    prefixset_mem: usize,
+    prefixmap_mem: usize,
+    treebitmap_mem: usize,
+    hashmap_mem: usize,
+    btreemap_mem: usize,
+    rtriemap_mem: usize,
+    lctriemap_mem: usize,
+) {
+    println!("family:     {family}");
+    println!("elements:   {elements}");
     println!(
         "PrefixSet:  {:.3} mB",
         prefixset_mem as f64 / 1024.0 / 1024.0
@@ -90,12 +66,70 @@ fn dense_memory_usage() {
         "BTreeMap:   {:.3} mB",
         btreemap_mem as f64 / 1024.0 / 1024.0
     );
+    println!("RTrieMap:  {:.3} mB", rtriemap_mem as f64 / 1024.0 / 1024.0);
     println!(
-        "IpRTrieMap: {:.3} mB",
-        iprtriemap_mem as f64 / 1024.0 / 1024.0
-    );
-    println!(
-        "IpLCTrieMap: {:.3} mB",
-        iplctriemap_mem as f64 / 1024.0 / 1024.0
+        "LCTrieMap: {:.3} mB",
+        lctriemap_mem as f64 / 1024.0 / 1024.0
     );
 }
+
+macro_rules! dense_memory_usage {
+    ($test_name:ident, $family:ty, $net:ty, $addr:ty) => {
+        #[test]
+        fn $test_name() {
+            let _guard = MEASURE_LOCK.lock().unwrap();
+            let addrs = ris_peer_initial_state::<$family>(0);
+            let mods = fill_table::<$family>(0, &addrs);
+
+            let (m, prefixmap_mem) = measure_alloc(|| {
+                let mut m = PrefixMap::new();
+                execute(&mut m, &mods);
+                m
+            });
+
+            let (_, prefixset_mem) =
+                measure_alloc(|| m.iter().map(|(p, _)| p).collect::<PrefixSet<_>>());
+
+            let (_, treebitmap_mem) = measure_alloc(|| {
+                let mut m: IpLookupTable<$addr, u32> = IpLookupTable::new();
+                execute(&mut m, &mods);
+                m
+            });
+
+            let (_, hashmap_mem) = measure_alloc(|| {
+                let mut m: HashMap<$net, u32> = HashMap::new();
+                execute(&mut m, &mods);
+                m
+            });
+
+            let (_, btreemap_mem) = measure_alloc(|| {
+                let mut m: BTreeMap<$net, u32> = BTreeMap::new();
+                execute(&mut m, &mods);
+                m
+            });
+
+            let (_, rtriemap_mem) = measure_alloc(|| {
+                let mut m: RTrieMap<<$family as BenchFamily>::TriePrefix, u32> = RTrieMap::new();
+                execute(&mut m, &mods);
+                m
+            });
+
+            let (_, lctriemap_mem) = measure_alloc(|| build_lc_trie_map::<$family>(&mods));
+
+            print_memory_usage(
+                <$family as BenchFamily>::NAME,
+                addrs.len(),
+                prefixset_mem,
+                prefixmap_mem,
+                treebitmap_mem,
+                hashmap_mem,
+                btreemap_mem,
+                rtriemap_mem,
+                lctriemap_mem,
+            );
+        }
+    };
+}
+
+dense_memory_usage!(dense_memory_usage, Ipv4, Ipv4Net, std::net::Ipv4Addr);
+dense_memory_usage!(dense_memory_usage_ipv6, Ipv6, Ipv6Net, Ipv6Addr);

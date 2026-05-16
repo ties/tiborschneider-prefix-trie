@@ -2,117 +2,235 @@
 #![allow(clippy::incompatible_msrv)]
 
 use ip_network_table_deps_treebitmap::IpLookupTable;
-use ipnet::{IpNet, Ipv4Net};
-use iptrie::{IpLCTrieMap, IpRTrieMap};
+use ipnet::{Ipv4Net, Ipv6Net};
+use iptrie::map::{LCTrieMap, RTrieMap};
+use iptrie::{IpRootPrefix, Ipv4Prefix, Ipv6Prefix};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
 use prefix_trie::*;
 use rand::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::net::Ipv4Addr;
+use std::hash::Hash;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-const PEER_MUTATIONS_PARQUET: &str =
+const PEER_MUTATIONS_IPV4_PARQUET: &str =
     "benches/data/20260511-mutations-peer-193.0.0.56AS3333.parquet";
-const PEER_INITIAL_STATE_PARQUET: &str =
+const PEER_INITIAL_STATE_IPV4_PARQUET: &str =
     "benches/data/20260511-initial-state-peer-193.0.0.56AS3333.parquet";
+const PEER_MUTATIONS_IPV6_PARQUET: &str =
+    "benches/data/20260511-mutations-peer-193.0.0.56AS3333-ipv6.parquet";
+const PEER_INITIAL_STATE_IPV6_PARQUET: &str =
+    "benches/data/20260511-initial-state-peer-193.0.0.56AS3333-ipv6.parquet";
 
-pub enum Insn {
-    Insert(Ipv4Addr, u8, u32),
-    Remove(Ipv4Addr, u8),
-    ExactMatch(Ipv4Addr, u8),
+pub enum Ipv4 {}
+pub enum Ipv6 {}
+
+pub trait BenchFamily: Sized {
+    type Addr: Copy + Eq + Hash + Ord;
+    type Net;
+    type TriePrefix: IpRootPrefix<Addr = Self::Addr>;
+    type PrefixMapImpl: BenchMap<Self>;
+    type TreeBitmapImpl: BenchMap<Self>;
+    type HashMapImpl: BenchMap<Self>;
+    type BTreeMapImpl: BenchMap<Self>;
+
+    const NAME: &'static str;
+    const MUTATIONS_PARQUET: &'static str;
+    const INITIAL_STATE_PARQUET: &'static str;
+
+    fn parse_net(value: &str) -> Option<Self::Net>;
+    fn addr(net: &Self::Net) -> Self::Addr;
+    fn prefix_len(net: &Self::Net) -> u8;
+    fn trie_prefix(addr: Self::Addr, len: u8) -> Self::TriePrefix;
+    fn reverse_bits(addr: Self::Addr) -> u128;
 }
 
-pub trait BenchMap: Sized {
+impl BenchFamily for Ipv4 {
+    type Addr = Ipv4Addr;
+    type Net = Ipv4Net;
+    type TriePrefix = Ipv4Prefix;
+    type PrefixMapImpl = PrefixMap<Ipv4Net, u32>;
+    type TreeBitmapImpl = IpLookupTable<Ipv4Addr, u32>;
+    type HashMapImpl = HashMap<Ipv4Net, u32>;
+    type BTreeMapImpl = BTreeMap<Ipv4Net, u32>;
+
+    const NAME: &'static str = "IPv4";
+    const MUTATIONS_PARQUET: &'static str = PEER_MUTATIONS_IPV4_PARQUET;
+    const INITIAL_STATE_PARQUET: &'static str = PEER_INITIAL_STATE_IPV4_PARQUET;
+
+    fn parse_net(value: &str) -> Option<Self::Net> {
+        value.parse().ok()
+    }
+
+    fn addr(net: &Self::Net) -> Self::Addr {
+        net.addr()
+    }
+
+    fn prefix_len(net: &Self::Net) -> u8 {
+        net.prefix_len()
+    }
+
+    fn trie_prefix(addr: Self::Addr, len: u8) -> Self::TriePrefix {
+        Ipv4Prefix::new(addr, len).unwrap()
+    }
+
+    fn reverse_bits(addr: Self::Addr) -> u128 {
+        u32::from(addr).reverse_bits() as u128
+    }
+}
+
+impl BenchFamily for Ipv6 {
+    type Addr = Ipv6Addr;
+    type Net = Ipv6Net;
+    type TriePrefix = Ipv6Prefix;
+    type PrefixMapImpl = PrefixMap<Ipv6Net, u32>;
+    type TreeBitmapImpl = IpLookupTable<Ipv6Addr, u32>;
+    type HashMapImpl = HashMap<Ipv6Net, u32>;
+    type BTreeMapImpl = BTreeMap<Ipv6Net, u32>;
+
+    const NAME: &'static str = "IPv6";
+    const MUTATIONS_PARQUET: &'static str = PEER_MUTATIONS_IPV6_PARQUET;
+    const INITIAL_STATE_PARQUET: &'static str = PEER_INITIAL_STATE_IPV6_PARQUET;
+
+    fn parse_net(value: &str) -> Option<Self::Net> {
+        value.parse().ok()
+    }
+
+    fn addr(net: &Self::Net) -> Self::Addr {
+        net.addr()
+    }
+
+    fn prefix_len(net: &Self::Net) -> u8 {
+        net.prefix_len()
+    }
+
+    fn trie_prefix(addr: Self::Addr, len: u8) -> Self::TriePrefix {
+        Ipv6Prefix::new(addr, len).unwrap()
+    }
+
+    fn reverse_bits(addr: Self::Addr) -> u128 {
+        u128::from(addr).reverse_bits()
+    }
+}
+
+pub enum Insn<F: BenchFamily> {
+    Insert(F::Addr, u8, u32),
+    Remove(F::Addr, u8),
+    ExactMatch(F::Addr, u8),
+}
+
+pub trait BenchMap<F: BenchFamily>: Sized {
     const NAME: &'static str;
     fn new_empty() -> Self;
-    fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32);
-    fn remove(&mut self, addr: Ipv4Addr, len: u8);
-    fn exact_match(&self, addr: Ipv4Addr, len: u8) -> Option<u32>;
+    fn insert(&mut self, addr: F::Addr, len: u8, val: u32);
+    fn remove(&mut self, addr: F::Addr, len: u8);
+    fn exact_match(&self, addr: F::Addr, len: u8) -> Option<u32>;
 }
 
-impl BenchMap for PrefixMap<Ipv4Net, u32> {
-    const NAME: &'static str = "PrefixMap";
+macro_rules! impl_net_bench_map {
+    ($family:ty, $addr:ty, $net:ty, $map:ty, $name:literal) => {
+        impl BenchMap<$family> for $map {
+            const NAME: &'static str = $name;
+            fn new_empty() -> Self {
+                <$map>::new()
+            }
+            fn insert(&mut self, addr: $addr, len: u8, val: u32) {
+                self.insert(<$net>::new(addr, len).unwrap(), val);
+            }
+            fn remove(&mut self, addr: $addr, len: u8) {
+                self.remove(&<$net>::new(addr, len).unwrap());
+            }
+            fn exact_match(&self, addr: $addr, len: u8) -> Option<u32> {
+                self.get(&<$net>::new(addr, len).unwrap()).copied()
+            }
+        }
+    };
+}
+
+impl_net_bench_map!(
+    Ipv4,
+    Ipv4Addr,
+    Ipv4Net,
+    PrefixMap<Ipv4Net, u32>,
+    "PrefixMap"
+);
+impl_net_bench_map!(
+    Ipv6,
+    Ipv6Addr,
+    Ipv6Net,
+    PrefixMap<Ipv6Net, u32>,
+    "PrefixMap"
+);
+impl_net_bench_map!(
+    Ipv4,
+    Ipv4Addr,
+    Ipv4Net,
+    HashMap<Ipv4Net, u32>,
+    "HashMap"
+);
+impl_net_bench_map!(
+    Ipv6,
+    Ipv6Addr,
+    Ipv6Net,
+    HashMap<Ipv6Net, u32>,
+    "HashMap"
+);
+impl_net_bench_map!(
+    Ipv4,
+    Ipv4Addr,
+    Ipv4Net,
+    BTreeMap<Ipv4Net, u32>,
+    "BTreeMap"
+);
+impl_net_bench_map!(
+    Ipv6,
+    Ipv6Addr,
+    Ipv6Net,
+    BTreeMap<Ipv6Net, u32>,
+    "BTreeMap"
+);
+
+macro_rules! impl_treebitmap_bench_map {
+    ($family:ty, $addr:ty) => {
+        impl BenchMap<$family> for IpLookupTable<$addr, u32> {
+            const NAME: &'static str = "TreeBitMap";
+            fn new_empty() -> Self {
+                IpLookupTable::new()
+            }
+            fn insert(&mut self, addr: $addr, len: u8, val: u32) {
+                self.insert(addr, len as u32, val);
+            }
+            fn remove(&mut self, addr: $addr, len: u8) {
+                self.remove(addr, len as u32);
+            }
+            fn exact_match(&self, addr: $addr, len: u8) -> Option<u32> {
+                self.exact_match(addr, len as u32).copied()
+            }
+        }
+    };
+}
+
+impl_treebitmap_bench_map!(Ipv4, Ipv4Addr);
+impl_treebitmap_bench_map!(Ipv6, Ipv6Addr);
+
+impl<F: BenchFamily> BenchMap<F> for RTrieMap<F::TriePrefix, u32> {
+    const NAME: &'static str = "RTrieMap";
     fn new_empty() -> Self {
-        PrefixMap::new()
+        RTrieMap::new()
     }
-    fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
-        self.insert(Ipv4Net::new(addr, len).unwrap(), val);
+    fn insert(&mut self, addr: F::Addr, len: u8, val: u32) {
+        self.insert(F::trie_prefix(addr, len), val);
     }
-    fn remove(&mut self, addr: Ipv4Addr, len: u8) {
-        self.remove(&Ipv4Net::new(addr, len).unwrap());
+    fn remove(&mut self, addr: F::Addr, len: u8) {
+        self.remove(&F::trie_prefix(addr, len));
     }
-    fn exact_match(&self, addr: Ipv4Addr, len: u8) -> Option<u32> {
-        self.get(&Ipv4Net::new(addr, len).unwrap()).copied()
-    }
-}
-
-impl BenchMap for IpLookupTable<Ipv4Addr, u32> {
-    const NAME: &'static str = "TreeBitMap";
-    fn new_empty() -> Self {
-        IpLookupTable::new()
-    }
-    fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
-        self.insert(addr, len as u32, val);
-    }
-    fn remove(&mut self, addr: Ipv4Addr, len: u8) {
-        self.remove(addr, len as u32);
-    }
-    fn exact_match(&self, addr: Ipv4Addr, len: u8) -> Option<u32> {
-        self.exact_match(addr, len as u32).copied()
+    fn exact_match(&self, addr: F::Addr, len: u8) -> Option<u32> {
+        self.get(&F::trie_prefix(addr, len)).copied()
     }
 }
 
-impl BenchMap for HashMap<Ipv4Net, u32> {
-    const NAME: &'static str = "HashMap";
-    fn new_empty() -> Self {
-        HashMap::new()
-    }
-    fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
-        self.insert(Ipv4Net::new(addr, len).unwrap(), val);
-    }
-    fn remove(&mut self, addr: Ipv4Addr, len: u8) {
-        self.remove(&Ipv4Net::new(addr, len).unwrap());
-    }
-    fn exact_match(&self, addr: Ipv4Addr, len: u8) -> Option<u32> {
-        self.get(&Ipv4Net::new(addr, len).unwrap()).copied()
-    }
-}
-
-impl BenchMap for BTreeMap<Ipv4Net, u32> {
-    const NAME: &'static str = "BTreeMap";
-    fn new_empty() -> Self {
-        BTreeMap::new()
-    }
-    fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
-        self.insert(Ipv4Net::new(addr, len).unwrap(), val);
-    }
-    fn remove(&mut self, addr: Ipv4Addr, len: u8) {
-        self.remove(&Ipv4Net::new(addr, len).unwrap());
-    }
-    fn exact_match(&self, addr: Ipv4Addr, len: u8) -> Option<u32> {
-        self.get(&Ipv4Net::new(addr, len).unwrap()).copied()
-    }
-}
-
-impl BenchMap for IpRTrieMap<u32> {
-    const NAME: &'static str = "IpRTrieMap";
-    fn new_empty() -> Self {
-        IpRTrieMap::new()
-    }
-    fn insert(&mut self, addr: Ipv4Addr, len: u8, val: u32) {
-        self.insert(IpNet::V4(Ipv4Net::new(addr, len).unwrap()), val);
-    }
-    fn remove(&mut self, addr: Ipv4Addr, len: u8) {
-        self.remove(&IpNet::V4(Ipv4Net::new(addr, len).unwrap()));
-    }
-    fn exact_match(&self, addr: Ipv4Addr, len: u8) -> Option<u32> {
-        self.get(&IpNet::V4(Ipv4Net::new(addr, len).unwrap()))
-            .copied()
-    }
-}
-
-pub fn execute<M: BenchMap>(map: &mut M, insns: &[Insn]) {
+pub fn execute<F: BenchFamily, M: BenchMap<F>>(map: &mut M, insns: &[Insn<F>]) {
     for insn in insns {
         std::hint::black_box(match insn {
             Insn::Insert(addr, len, val) => {
@@ -128,20 +246,20 @@ pub fn execute<M: BenchMap>(map: &mut M, insns: &[Insn]) {
     }
 }
 
-pub fn build_ip_lc_trie_map(insns: &[Insn]) -> IpLCTrieMap<u32> {
-    let mut map = IpRTrieMap::new();
-    execute(&mut map, insns);
+pub fn build_lc_trie_map<F: BenchFamily>(insns: &[Insn<F>]) -> LCTrieMap<F::TriePrefix, u32> {
+    let mut map = RTrieMap::new();
+    execute::<F, _>(&mut map, insns);
     map.compress()
 }
 
-pub fn execute_ip_lc_lookups(map: &IpLCTrieMap<u32>, insns: &[Insn]) {
+pub fn execute_lc_lookups<F: BenchFamily>(map: &LCTrieMap<F::TriePrefix, u32>, insns: &[Insn<F>]) {
     for insn in insns {
         let Insn::ExactMatch(addr, len) = insn else {
-            panic!("IpLCTrieMap lookup benchmarks only accept exact-match instructions");
+            panic!("LCTrieMap lookup benchmarks only accept exact-match instructions");
         };
-        // Keep the borrowed result here so the benchmark measures IpLCTrieMap's lookup path without
+        // Keep the borrowed result here so the benchmark measures LCTrieMap's lookup path without
         // an additional copy.
-        std::hint::black_box(map.get(&IpNet::V4(Ipv4Net::new(*addr, *len).unwrap())));
+        std::hint::black_box(map.get(&F::trie_prefix(*addr, *len)));
     }
 }
 
@@ -155,10 +273,10 @@ pub fn random_addr(rng: &mut StdRng) -> (Ipv4Addr, u8) {
 }
 
 /// Return all prefixes in the RIB of a RIS peer, in random order.
-pub fn ris_peer_initial_state(seed: u64) -> Vec<(Ipv4Addr, u8)> {
+pub fn ris_peer_initial_state<F: BenchFamily>(seed: u64) -> Vec<(F::Addr, u8)> {
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(PEER_INITIAL_STATE_PARQUET);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(F::INITIAL_STATE_PARQUET);
     let file = File::open(&path).unwrap_or_else(|err| {
         panic!("failed to open {}: {err}", path.display());
     });
@@ -170,8 +288,8 @@ pub fn ris_peer_initial_state(seed: u64) -> Vec<(Ipv4Addr, u8)> {
 
     for row in reader.get_row_iter(None).unwrap() {
         let row = row.unwrap();
-        if let Ok(prefix) = row.get_string(0).unwrap().parse::<Ipv4Net>() {
-            prefixes.push((prefix.addr(), prefix.prefix_len()));
+        if let Some(prefix) = F::parse_net(row.get_string(0).unwrap()) {
+            prefixes.push((F::addr(&prefix), F::prefix_len(&prefix)));
         }
     }
 
@@ -183,8 +301,8 @@ pub fn ris_peer_initial_state(seed: u64) -> Vec<(Ipv4Addr, u8)> {
 /// Return all mutations during 24h of a RIS peer
 ///
 /// The data is sorted by time and the data is returned in original order.
-pub fn ris_peer_mutations() -> Vec<Insn> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(PEER_MUTATIONS_PARQUET);
+pub fn ris_peer_mutations<F: BenchFamily>() -> Vec<Insn<F>> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(F::MUTATIONS_PARQUET);
     let file = File::open(&path).unwrap_or_else(|err| {
         panic!("failed to open {}: {err}", path.display());
     });
@@ -197,13 +315,13 @@ pub fn ris_peer_mutations() -> Vec<Insn> {
     for row in reader.get_row_iter(None).unwrap() {
         let row = row.unwrap();
         let operation = row.get_string(0).unwrap();
-        let Ok(prefix) = row.get_string(1).unwrap().parse::<Ipv4Net>() else {
+        let Some(prefix) = F::parse_net(row.get_string(1).unwrap()) else {
             continue;
         };
 
         let mutation = match operation.as_str() {
-            "A" => Insn::Insert(prefix.addr(), prefix.prefix_len(), rng.gen::<u32>()),
-            "W" => Insn::Remove(prefix.addr(), prefix.prefix_len()),
+            "A" => Insn::Insert(F::addr(&prefix), F::prefix_len(&prefix), rng.gen::<u32>()),
+            "W" => Insn::Remove(F::addr(&prefix), F::prefix_len(&prefix)),
             op => panic!("unknown mutation operation {op:?}"),
         };
         mutations.push(mutation);
@@ -212,7 +330,10 @@ pub fn ris_peer_mutations() -> Vec<Insn> {
     mutations
 }
 
-pub fn generate_random_mods_dense(seed: u64, iter: usize) -> (Vec<Insn>, HashSet<(Ipv4Addr, u8)>) {
+pub fn generate_random_mods_dense(
+    seed: u64,
+    iter: usize,
+) -> (Vec<Insn<Ipv4>>, HashSet<(Ipv4Addr, u8)>) {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut result = Vec::new();
 
@@ -241,7 +362,7 @@ pub fn generate_random_lookups_dense(
     seed: u64,
     iter: usize,
     addresses: &HashSet<(Ipv4Addr, u8)>,
-) -> Vec<Insn> {
+) -> Vec<Insn<Ipv4>> {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut result = Vec::new();
 
@@ -265,7 +386,7 @@ pub fn sparse_addresses(seed: u64, num: usize) -> Vec<(Ipv4Addr, u8)> {
     (0..num).map(|_| random_addr(&mut rng)).collect()
 }
 
-pub fn fill_table(seed: u64, addresses: &[(Ipv4Addr, u8)]) -> Vec<Insn> {
+pub fn fill_table<F: BenchFamily>(seed: u64, addresses: &[(F::Addr, u8)]) -> Vec<Insn<F>> {
     let mut rng = StdRng::seed_from_u64(seed);
     addresses
         .iter()
@@ -277,11 +398,11 @@ pub fn fill_table(seed: u64, addresses: &[(Ipv4Addr, u8)]) -> Vec<Insn> {
         .collect()
 }
 
-pub fn generate_random_mods_sparse(
+pub fn generate_random_mods_sparse<F: BenchFamily>(
     seed: u64,
     iter: usize,
-    addresses: &[(Ipv4Addr, u8)],
-) -> Vec<Insn> {
+    addresses: &[(F::Addr, u8)],
+) -> Vec<Insn<F>> {
     let mut rng = StdRng::seed_from_u64(seed);
     (0..iter)
         .map(|_| {
@@ -296,11 +417,11 @@ pub fn generate_random_mods_sparse(
         .collect()
 }
 
-pub fn generate_random_lookups_sparse(
+pub fn generate_random_lookups_sparse<F: BenchFamily>(
     seed: u64,
     iter: usize,
-    addresses: &[(Ipv4Addr, u8)],
-) -> Vec<Insn> {
+    addresses: &[(F::Addr, u8)],
+) -> Vec<Insn<F>> {
     let mut rng = StdRng::seed_from_u64(seed);
     (0..iter)
         .map(|_| {

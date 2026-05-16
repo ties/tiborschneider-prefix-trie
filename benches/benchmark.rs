@@ -4,56 +4,61 @@ use common::*;
 
 const ITERS: usize = 100_000;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use ip_network_table_deps_treebitmap::IpLookupTable;
-use ipnet::Ipv4Net;
-use iptrie::IpRTrieMap;
+use criterion::measurement::WallTime;
+use criterion::{criterion_group, criterion_main, BenchmarkGroup, Criterion, Throughput};
+use iptrie::map::RTrieMap;
 use itertools::Itertools;
-use prefix_trie::*;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 
-macro_rules! bench_one {
-    ($group:expr, $t:ty, |$s:ident| $setup:expr, |$r:ident| $run:expr) => {{
-        $group.bench_function(<$t as BenchMap>::NAME, |b| {
-            b.iter_with_setup(
-                || {
-                    let mut $s: $t = <$t as BenchMap>::new_empty();
-                    $setup;
-                    $s
-                },
-                |mut $r| {
-                    $run;
-                    $r
-                },
-            )
-        });
-    }};
+fn bench_one<F, M>(group: &mut BenchmarkGroup<'_, WallTime>, setup: &[Insn<F>], run: &[Insn<F>])
+where
+    F: BenchFamily,
+    M: BenchMap<F>,
+{
+    group.bench_function(M::NAME, |b| {
+        b.iter_with_setup(
+            || {
+                let mut map = M::new_empty();
+                execute::<F, _>(&mut map, setup);
+                map
+            },
+            |mut map| {
+                execute::<F, _>(&mut map, run);
+                map
+            },
+        )
+    });
 }
 
-macro_rules! bench_all {
-    ($group:expr, |$s:ident| $setup:expr, |$r:ident| $run:expr) => {
-        bench_one!($group, PrefixMap<Ipv4Net, u32>, |$s| $setup, |$r| $run);
-        bench_one!($group, IpLookupTable<Ipv4Addr, u32>, |$s| $setup, |$r| $run);
-        bench_one!($group, HashMap<Ipv4Net, u32>, |$s| $setup, |$r| $run);
-        bench_one!($group, BTreeMap<Ipv4Net, u32>, |$s| $setup, |$r| $run);
-        bench_one!($group, IpRTrieMap<u32>, |$s| $setup, |$r| $run);
-    };
+fn bench_all<F>(group: &mut BenchmarkGroup<'_, WallTime>, setup: &[Insn<F>], run: &[Insn<F>])
+where
+    F: BenchFamily,
+{
+    bench_one::<F, F::PrefixMapImpl>(group, setup, run);
+    bench_one::<F, F::TreeBitmapImpl>(group, setup, run);
+    bench_one::<F, F::HashMapImpl>(group, setup, run);
+    bench_one::<F, F::BTreeMapImpl>(group, setup, run);
+    bench_one::<F, RTrieMap<F::TriePrefix, u32>>(group, setup, run);
 }
 
-macro_rules! bench_lookup_only {
-    ($group:expr, $setup:expr, $lookups:expr) => {{
-        $group.bench_function("IpLCTrieMap", |b| {
-            b.iter_with_setup(
-                || build_ip_lc_trie_map($setup),
-                |m| {
-                    execute_ip_lc_lookups(&m, $lookups);
-                    m
-                },
-            )
-        });
-    }};
+fn bench_lookup_only<F>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    setup: &[Insn<F>],
+    lookups: &[Insn<F>],
+) where
+    F: BenchFamily,
+{
+    group.bench_function("LCTrieMap", |b| {
+        b.iter_with_setup(
+            || build_lc_trie_map::<F>(setup),
+            |m| {
+                execute_lc_lookups::<F>(&m, lookups);
+                m
+            },
+        )
+    });
 }
 
 pub fn random_mods(c: &mut Criterion) {
@@ -61,7 +66,7 @@ pub fn random_mods(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("random-mods");
     group.throughput(Throughput::Elements(insn.len() as u64));
-    bench_all!(group, |_m| {}, |m| execute(&mut m, &insn));
+    bench_all::<Ipv4>(&mut group, &[], &insn);
     group.finish();
 }
 
@@ -71,44 +76,63 @@ pub fn random_lookup(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("random-lookup");
     group.throughput(Throughput::Elements(lookups.len() as u64));
-    bench_all!(group, |m| execute(&mut m, &mods), |m| execute(
-        &mut m, &lookups
-    ));
-    bench_lookup_only!(group, &mods, &lookups);
+    bench_all::<Ipv4>(&mut group, &mods, &lookups);
+    bench_lookup_only::<Ipv4>(&mut group, &mods, &lookups);
+    group.finish();
+}
+
+fn bgp_mods_random_for<F>(c: &mut Criterion, group_name: &str)
+where
+    F: BenchFamily,
+{
+    let addrs = ris_peer_initial_state::<F>(0);
+    let setup = fill_table::<F>(0, &addrs);
+    let insn = generate_random_mods_sparse::<F>(0, ITERS, &addrs);
+
+    let mut group = c.benchmark_group(group_name);
+    group.throughput(Throughput::Elements(insn.len() as u64));
+    bench_all::<F>(&mut group, &setup, &insn);
     group.finish();
 }
 
 pub fn bgp_mods_random(c: &mut Criterion) {
-    let addrs = ris_peer_initial_state(0);
-    let setup = fill_table(0, &addrs);
-    let insn = generate_random_mods_sparse(0, ITERS, &addrs);
+    bgp_mods_random_for::<Ipv4>(c, "bgp-mods-random");
+}
 
-    let mut group = c.benchmark_group("bgp-mods-random");
-    group.throughput(Throughput::Elements(insn.len() as u64));
-    bench_all!(group, |m| execute(&mut m, &setup), |m| execute(
-        &mut m, &insn
-    ));
+pub fn bgp_mods_random_ipv6(c: &mut Criterion) {
+    bgp_mods_random_for::<Ipv6>(c, "bgp-mods-random-ipv6");
+}
+
+fn bgp_lookup_random_for<F>(c: &mut Criterion, group_name: &str)
+where
+    F: BenchFamily,
+{
+    let addrs = ris_peer_initial_state::<F>(0);
+    let mods = fill_table::<F>(0, &addrs);
+    let lookups = generate_random_lookups_sparse::<F>(0, ITERS, &addrs);
+
+    let mut group = c.benchmark_group(group_name);
+    group.throughput(Throughput::Elements(lookups.len() as u64));
+    bench_all::<F>(&mut group, &mods, &lookups);
+    bench_lookup_only::<F>(&mut group, &mods, &lookups);
     group.finish();
 }
 
 pub fn bgp_lookup_random(c: &mut Criterion) {
-    let addrs = ris_peer_initial_state(0);
-    let mods = fill_table(0, &addrs);
-    let lookups = generate_random_lookups_sparse(0, ITERS, &addrs);
-
-    let mut group = c.benchmark_group("bgp-lookup-random");
-    group.throughput(Throughput::Elements(lookups.len() as u64));
-    bench_all!(group, |m| execute(&mut m, &mods), |m| execute(
-        &mut m, &lookups
-    ));
-    bench_lookup_only!(group, &mods, &lookups);
-    group.finish();
+    bgp_lookup_random_for::<Ipv4>(c, "bgp-lookup-random");
 }
 
-pub fn bgp_lookup_ris(c: &mut Criterion) {
-    let addrs = ris_peer_initial_state(0);
-    let mods = fill_table(0, &addrs);
-    let mutations = ris_peer_mutations();
+pub fn bgp_lookup_random_ipv6(c: &mut Criterion) {
+    bgp_lookup_random_for::<Ipv6>(c, "bgp-lookup-random-ipv6");
+}
+
+fn bgp_lookup_ris_for<F>(c: &mut Criterion, group_name: &str)
+where
+    F: BenchFamily,
+{
+    let addrs = ris_peer_initial_state::<F>(0);
+    let mods = fill_table::<F>(0, &addrs);
+    let mutations = ris_peer_mutations::<F>();
     let lookups = mutations
         .into_iter()
         .map(|x| match x {
@@ -118,53 +142,90 @@ pub fn bgp_lookup_ris(c: &mut Criterion) {
         })
         .collect::<Vec<_>>();
 
-    let mut group = c.benchmark_group("bgp-lookup-ris");
+    let mut group = c.benchmark_group(group_name);
     group.throughput(Throughput::Elements(lookups.len() as u64));
-    bench_all!(group, |m| execute(&mut m, &mods), |m| execute(
-        &mut m, &lookups
-    ));
-    bench_lookup_only!(group, &mods, &lookups);
+    bench_all::<F>(&mut group, &mods, &lookups);
+    bench_lookup_only::<F>(&mut group, &mods, &lookups);
+    group.finish();
+}
+
+pub fn bgp_lookup_ris(c: &mut Criterion) {
+    bgp_lookup_ris_for::<Ipv4>(c, "bgp-lookup-ris");
+}
+
+pub fn bgp_lookup_ris_ipv6(c: &mut Criterion) {
+    bgp_lookup_ris_for::<Ipv6>(c, "bgp-lookup-ris-ipv6");
+}
+
+fn bgp_mods_ris_for<F>(c: &mut Criterion, group_name: &str)
+where
+    F: BenchFamily,
+{
+    let addrs = ris_peer_initial_state::<F>(0);
+    let initial_table = fill_table::<F>(0, &addrs);
+    let mutations = ris_peer_mutations::<F>();
+
+    let mut group = c.benchmark_group(group_name);
+    group.throughput(Throughput::Elements(mutations.len() as u64));
+    bench_all::<F>(&mut group, &initial_table, &mutations);
     group.finish();
 }
 
 pub fn bgp_mods_ris(c: &mut Criterion) {
-    let addrs = ris_peer_initial_state(0);
-    let initial_table = fill_table(0, &addrs);
-    let mutations = ris_peer_mutations();
+    bgp_mods_ris_for::<Ipv4>(c, "bgp-mods-ris");
+}
 
-    let mut group = c.benchmark_group("bgp-mods-ris");
-    group.throughput(Throughput::Elements(mutations.len() as u64));
-    bench_all!(group, |m| execute(&mut m, &initial_table), |m| execute(
-        &mut m, &mutations
-    ));
-    group.finish();
+pub fn bgp_mods_ris_ipv6(c: &mut Criterion) {
+    bgp_mods_ris_for::<Ipv6>(c, "bgp-mods-ris-ipv6");
 }
 
 /// Created by random order
-/// 
+///
 /// This likely is an adverse case for CPU data pre-fetching because there is no pattern
-pub fn bgp_create_random(c: &mut Criterion) {
-    let addrs = ris_peer_initial_state(0);
-    let inserts = fill_table(0, &addrs);
+fn bgp_create_random_for<F>(c: &mut Criterion, group_name: &str)
+where
+    F: BenchFamily,
+{
+    let addrs = ris_peer_initial_state::<F>(0);
+    let inserts = fill_table::<F>(0, &addrs);
 
-    let mut group = c.benchmark_group("bgp-create-random");
+    let mut group = c.benchmark_group(group_name);
     group.throughput(Throughput::Elements(inserts.len() as u64));
-    bench_all!(group, |_m| {}, |m| execute(&mut m, &inserts));
+    bench_all::<F>(&mut group, &[], &inserts);
     group.finish();
+}
+
+pub fn bgp_create_random(c: &mut Criterion) {
+    bgp_create_random_for::<Ipv4>(c, "bgp-create-random");
+}
+
+pub fn bgp_create_random_ipv6(c: &mut Criterion) {
+    bgp_create_random_for::<Ipv6>(c, "bgp-create-random-ipv6");
 }
 
 /// Created ordered by IP address, followed by prefix length
 ///
 /// (default Ord of the tuple)
-pub fn bgp_create_ordered_lexicographic(c: &mut Criterion) {
-    let addrs = ris_peer_initial_state(0);
+fn bgp_create_ordered_lexicographic_for<F>(c: &mut Criterion, group_name: &str)
+where
+    F: BenchFamily,
+{
+    let addrs = ris_peer_initial_state::<F>(0);
     let sorted_addrs: Vec<_> = addrs.iter().cloned().sorted().collect();
-    let inserts = fill_table(0, &sorted_addrs);
+    let inserts = fill_table::<F>(0, &sorted_addrs);
 
-    let mut group = c.benchmark_group("bgp-create-ordered-lexicographic");
+    let mut group = c.benchmark_group(group_name);
     group.throughput(Throughput::Elements(inserts.len() as u64));
-    bench_all!(group, |_m| {}, |m| execute(&mut m, &inserts));
+    bench_all::<F>(&mut group, &[], &inserts);
     group.finish();
+}
+
+pub fn bgp_create_ordered_lexicographic(c: &mut Criterion) {
+    bgp_create_ordered_lexicographic_for::<Ipv4>(c, "bgp-create-ordered-lexicographic");
+}
+
+pub fn bgp_create_ordered_lexicographic_ipv6(c: &mut Criterion) {
+    bgp_create_ordered_lexicographic_for::<Ipv6>(c, "bgp-create-ordered-lexicographic-ipv6");
 }
 
 /// Created in adverse order.
@@ -173,40 +234,74 @@ pub fn bgp_create_ordered_lexicographic(c: &mut Criterion) {
 /// potentially reducing the sharing of data already in cache.
 ///
 /// Note that for treebitmaps, a stride reversed order may be worse.
+fn adverse_cmp<F: BenchFamily>(a: &(F::Addr, u8), b: &(F::Addr, u8)) -> Ordering {
+    a.1.cmp(&b.1)
+        .then(F::reverse_bits(a.0).cmp(&F::reverse_bits(b.0)))
+        .then(a.0.cmp(&b.0))
+}
+
+fn bgp_create_ordered_adverse_bit_reversed_for<F>(c: &mut Criterion, group_name: &str)
+where
+    F: BenchFamily,
+{
+    let addrs = ris_peer_initial_state::<F>(0);
+    let sorted_addrs: Vec<_> = addrs
+        .iter()
+        .cloned()
+        .sorted_unstable_by(adverse_cmp::<F>)
+        .collect();
+    let inserts = fill_table::<F>(0, &sorted_addrs);
+
+    let mut group = c.benchmark_group(group_name);
+    group.throughput(Throughput::Elements(inserts.len() as u64));
+    bench_all::<F>(&mut group, &[], &inserts);
+    group.finish();
+}
+
 pub fn bgp_create_ordered_adverse_bit_reversed(c: &mut Criterion) {
     // validate comparator here - can not add tests in benches.
-    let cmp = |a: &(Ipv4Addr, u8), b: &(Ipv4Addr, u8)| {
-        a.1.cmp(&b.1)
-            .then(
-                a.0.to_bits()
-                    .reverse_bits()
-                    .cmp(&b.0.to_bits().reverse_bits()),
-            )
-            .then(a.0.cmp(&b.0))
-    };
     assert_eq!(
-        cmp(
+        adverse_cmp::<Ipv4>(
             &(Ipv4Addr::new(127, 0, 0, 1), 8),
             &(Ipv4Addr::new(127, 0, 0, 255), 8)
         ),
         Ordering::Less
     );
     assert_eq!(
-        cmp(
+        adverse_cmp::<Ipv4>(
             &(Ipv4Addr::new(127, 0, 0, 1), 24),
             &(Ipv4Addr::new(127, 0, 0, 1), 8)
         ),
         Ordering::Greater
     );
 
-    let addrs = ris_peer_initial_state(0);
-    let sorted_addrs: Vec<_> = addrs.iter().cloned().sorted_unstable_by(&cmp).collect();
-    let inserts = fill_table(0, &sorted_addrs);
+    bgp_create_ordered_adverse_bit_reversed_for::<Ipv4>(
+        c,
+        "bgp-create-ordered-adverse-bit-reversed",
+    );
+}
 
-    let mut group = c.benchmark_group("bgp-create-ordered-adverse-bit-reversed");
-    group.throughput(Throughput::Elements(inserts.len() as u64));
-    bench_all!(group, |_m| {}, |m| execute(&mut m, &inserts));
-    group.finish();
+pub fn bgp_create_ordered_adverse_bit_reversed_ipv6(c: &mut Criterion) {
+    // validate comparator here - can not add tests in benches.
+    assert_eq!(
+        adverse_cmp::<Ipv6>(
+            &("2001:db8::1".parse().unwrap(), 32),
+            &("2001:db8::ff".parse().unwrap(), 32)
+        ),
+        Ordering::Less
+    );
+    assert_eq!(
+        adverse_cmp::<Ipv6>(
+            &("2001:db8::1".parse().unwrap(), 48),
+            &("2001:db8::1".parse().unwrap(), 32)
+        ),
+        Ordering::Greater
+    );
+
+    bgp_create_ordered_adverse_bit_reversed_for::<Ipv6>(
+        c,
+        "bgp-create-ordered-adverse-bit-reversed-ipv6",
+    );
 }
 
 #[derive(Default)]
@@ -254,11 +349,18 @@ criterion_group!(
         // random_mods,
         // random_lookup,
         bgp_mods_random,
+        bgp_mods_random_ipv6,
         bgp_lookup_random,
+        bgp_lookup_random_ipv6,
         bgp_mods_ris,
+        bgp_mods_ris_ipv6,
         bgp_lookup_ris,
+        bgp_lookup_ris_ipv6,
         bgp_create_random,
+        bgp_create_random_ipv6,
         bgp_create_ordered_lexicographic,
+        bgp_create_ordered_lexicographic_ipv6,
         bgp_create_ordered_adverse_bit_reversed,
+        bgp_create_ordered_adverse_bit_reversed_ipv6,
 );
 criterion_main!(benches);
