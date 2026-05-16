@@ -140,6 +140,9 @@ pub fn bgp_mods_ris(c: &mut Criterion) {
     group.finish();
 }
 
+/// Created by random order
+/// 
+/// This likely is an adverse case for CPU data pre-fetching because there is no pattern
 pub fn bgp_create_random(c: &mut Criterion) {
     let addrs = ris_peer_initial_state(0);
     let inserts = fill_table(0, &addrs);
@@ -166,16 +169,19 @@ pub fn bgp_create_ordered_lexicographic(c: &mut Criterion) {
 
 /// Created in adverse order.
 ///
-/// Sort Ip address by least significant bits first, potentially reducing the sharing
-/// of data already in cache.
+/// Sort by prefix length first, then by IP address from least significant bits to most,
+/// potentially reducing the sharing of data already in cache.
 ///
-/// Note that for treebitmaps, a stride reversed order may be worse.a stride reversed order may be worse.
+/// Note that for treebitmaps, a stride reversed order may be worse.
 pub fn bgp_create_ordered_adverse_bit_reversed(c: &mut Criterion) {
     // validate comparator here - can not add tests in benches.
     let cmp = |a: &(Ipv4Addr, u8), b: &(Ipv4Addr, u8)| {
-        a.0.to_bits()
-            .reverse_bits()
-            .cmp(&&b.0.to_bits().reverse_bits())
+        a.1.cmp(&b.1)
+            .then(
+                a.0.to_bits()
+                    .reverse_bits()
+                    .cmp(&b.0.to_bits().reverse_bits()),
+            )
             .then(a.0.cmp(&b.0))
     };
     assert_eq!(
@@ -187,8 +193,8 @@ pub fn bgp_create_ordered_adverse_bit_reversed(c: &mut Criterion) {
     );
     assert_eq!(
         cmp(
-            &(Ipv4Addr::new(192, 0, 0, 1), 24),
-            &(Ipv4Addr::new(127, 0, 0, 0), 8)
+            &(Ipv4Addr::new(127, 0, 0, 1), 24),
+            &(Ipv4Addr::new(127, 0, 0, 1), 8)
         ),
         Ordering::Greater
     );
