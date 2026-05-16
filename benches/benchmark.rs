@@ -10,6 +10,7 @@ use ipnet::Ipv4Net;
 use iptrie::IpRTrieMap;
 use itertools::Itertools;
 use prefix_trie::*;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::Ipv4Addr;
 
@@ -149,12 +150,54 @@ pub fn bgp_create_random(c: &mut Criterion) {
     group.finish();
 }
 
-pub fn bgp_create_ordered(c: &mut Criterion) {
+/// Created ordered by IP address, followed by prefix length
+///
+/// (default Ord of the tuple)
+pub fn bgp_create_ordered_lexicographic(c: &mut Criterion) {
     let addrs = ris_peer_initial_state(0);
     let sorted_addrs: Vec<_> = addrs.iter().cloned().sorted().collect();
     let inserts = fill_table(0, &sorted_addrs);
 
-    let mut group = c.benchmark_group("bgp-create-ordered");
+    let mut group = c.benchmark_group("bgp-create-ordered-lexicographic");
+    group.throughput(Throughput::Elements(inserts.len() as u64));
+    bench_all!(group, |_m| {}, |m| execute(&mut m, &inserts));
+    group.finish();
+}
+
+/// Created in adverse order.
+///
+/// Sort Ip address by least significant bits first, potentially reducing the sharing
+/// of data already in cache.
+///
+/// Note that for treebitmaps, a stride reversed order may be worse.a stride reversed order may be worse.
+pub fn bgp_create_ordered_adverse_bit_reversed(c: &mut Criterion) {
+    // validate comparator here - can not add tests in benches.
+    let cmp = |a: &(Ipv4Addr, u8), b: &(Ipv4Addr, u8)| {
+        a.0.to_bits()
+            .reverse_bits()
+            .cmp(&&b.0.to_bits().reverse_bits())
+            .then(a.0.cmp(&b.0))
+    };
+    assert_eq!(
+        cmp(
+            &(Ipv4Addr::new(127, 0, 0, 1), 8),
+            &(Ipv4Addr::new(127, 0, 0, 255), 8)
+        ),
+        Ordering::Less
+    );
+    assert_eq!(
+        cmp(
+            &(Ipv4Addr::new(192, 0, 0, 1), 24),
+            &(Ipv4Addr::new(127, 0, 0, 0), 8)
+        ),
+        Ordering::Greater
+    );
+
+    let addrs = ris_peer_initial_state(0);
+    let sorted_addrs: Vec<_> = addrs.iter().cloned().sorted_unstable_by(&cmp).collect();
+    let inserts = fill_table(0, &sorted_addrs);
+
+    let mut group = c.benchmark_group("bgp-create-ordered-adverse-bit-reversed");
     group.throughput(Throughput::Elements(inserts.len() as u64));
     bench_all!(group, |_m| {}, |m| execute(&mut m, &inserts));
     group.finish();
@@ -209,6 +252,7 @@ criterion_group!(
         bgp_mods_ris,
         bgp_lookup_ris,
         bgp_create_random,
-        bgp_create_ordered,
+        bgp_create_ordered_lexicographic,
+        bgp_create_ordered_adverse_bit_reversed,
 );
 criterion_main!(benches);
