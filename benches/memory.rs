@@ -3,7 +3,6 @@ use common::*;
 
 use ip_network_table_deps_treebitmap::IpLookupTable;
 use ipnet::{Ipv4Net, Ipv6Net};
-use iptrie::map::RTrieMap;
 use prefix_trie::*;
 use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv6Addr;
@@ -44,8 +43,6 @@ fn print_memory_usage(
     treebitmap_mem: usize,
     hashmap_mem: usize,
     btreemap_mem: usize,
-    rtriemap_mem: usize,
-    lctriemap_mem: usize,
 ) {
     println!("family:     {family}");
     println!("elements:   {elements}");
@@ -65,11 +62,6 @@ fn print_memory_usage(
     println!(
         "BTreeMap:   {:.3} mB",
         btreemap_mem as f64 / 1024.0 / 1024.0
-    );
-    println!("RTrieMap:  {:.3} mB", rtriemap_mem as f64 / 1024.0 / 1024.0);
-    println!(
-        "LCTrieMap: {:.3} mB",
-        lctriemap_mem as f64 / 1024.0 / 1024.0
     );
 }
 
@@ -108,14 +100,6 @@ macro_rules! dense_memory_usage {
                 m
             });
 
-            let (_, rtriemap_mem) = measure_alloc(|| {
-                let mut m: RTrieMap<<$family as BenchFamily>::TriePrefix, u32> = RTrieMap::new();
-                execute(&mut m, &mods);
-                m
-            });
-
-            let (_, lctriemap_mem) = measure_alloc(|| build_lc_trie_map::<$family>(&mods));
-
             print_memory_usage(
                 <$family as BenchFamily>::NAME,
                 addrs.len(),
@@ -124,8 +108,6 @@ macro_rules! dense_memory_usage {
                 treebitmap_mem,
                 hashmap_mem,
                 btreemap_mem,
-                rtriemap_mem,
-                lctriemap_mem,
             );
         }
     };

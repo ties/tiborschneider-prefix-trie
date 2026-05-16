@@ -3,8 +3,6 @@
 
 use ip_network_table_deps_treebitmap::IpLookupTable;
 use ipnet::{Ipv4Net, Ipv6Net};
-use iptrie::map::{LCTrieMap, RTrieMap};
-use iptrie::{IpRootPrefix, Ipv4Prefix, Ipv6Prefix};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
 use prefix_trie::*;
@@ -29,7 +27,6 @@ pub enum Ipv6 {}
 pub trait BenchFamily: Sized {
     type Addr: Copy + Eq + Hash + Ord;
     type Net;
-    type TriePrefix: IpRootPrefix<Addr = Self::Addr>;
     type PrefixMapImpl: BenchMap<Self>;
     type TreeBitmapImpl: BenchMap<Self>;
     type HashMapImpl: BenchMap<Self>;
@@ -42,14 +39,12 @@ pub trait BenchFamily: Sized {
     fn parse_net(value: &str) -> Option<Self::Net>;
     fn addr(net: &Self::Net) -> Self::Addr;
     fn prefix_len(net: &Self::Net) -> u8;
-    fn trie_prefix(addr: Self::Addr, len: u8) -> Self::TriePrefix;
     fn reverse_bits(addr: Self::Addr) -> u128;
 }
 
 impl BenchFamily for Ipv4 {
     type Addr = Ipv4Addr;
     type Net = Ipv4Net;
-    type TriePrefix = Ipv4Prefix;
     type PrefixMapImpl = PrefixMap<Ipv4Net, u32>;
     type TreeBitmapImpl = IpLookupTable<Ipv4Addr, u32>;
     type HashMapImpl = HashMap<Ipv4Net, u32>;
@@ -71,10 +66,6 @@ impl BenchFamily for Ipv4 {
         net.prefix_len()
     }
 
-    fn trie_prefix(addr: Self::Addr, len: u8) -> Self::TriePrefix {
-        Ipv4Prefix::new(addr, len).unwrap()
-    }
-
     fn reverse_bits(addr: Self::Addr) -> u128 {
         u32::from(addr).reverse_bits() as u128
     }
@@ -83,7 +74,6 @@ impl BenchFamily for Ipv4 {
 impl BenchFamily for Ipv6 {
     type Addr = Ipv6Addr;
     type Net = Ipv6Net;
-    type TriePrefix = Ipv6Prefix;
     type PrefixMapImpl = PrefixMap<Ipv6Net, u32>;
     type TreeBitmapImpl = IpLookupTable<Ipv6Addr, u32>;
     type HashMapImpl = HashMap<Ipv6Net, u32>;
@@ -103,10 +93,6 @@ impl BenchFamily for Ipv6 {
 
     fn prefix_len(net: &Self::Net) -> u8 {
         net.prefix_len()
-    }
-
-    fn trie_prefix(addr: Self::Addr, len: u8) -> Self::TriePrefix {
-        Ipv6Prefix::new(addr, len).unwrap()
     }
 
     fn reverse_bits(addr: Self::Addr) -> u128 {
@@ -214,21 +200,6 @@ macro_rules! impl_treebitmap_bench_map {
 impl_treebitmap_bench_map!(Ipv4, Ipv4Addr);
 impl_treebitmap_bench_map!(Ipv6, Ipv6Addr);
 
-impl<F: BenchFamily> BenchMap<F> for RTrieMap<F::TriePrefix, u32> {
-    const NAME: &'static str = "RTrieMap";
-    fn new_empty() -> Self {
-        RTrieMap::new()
-    }
-    fn insert(&mut self, addr: F::Addr, len: u8, val: u32) {
-        self.insert(F::trie_prefix(addr, len), val);
-    }
-    fn remove(&mut self, addr: F::Addr, len: u8) {
-        self.remove(&F::trie_prefix(addr, len));
-    }
-    fn exact_match(&self, addr: F::Addr, len: u8) -> Option<u32> {
-        self.get(&F::trie_prefix(addr, len)).copied()
-    }
-}
 
 pub fn execute<F: BenchFamily, M: BenchMap<F>>(map: &mut M, insns: &[Insn<F>]) {
     for insn in insns {
@@ -246,22 +217,6 @@ pub fn execute<F: BenchFamily, M: BenchMap<F>>(map: &mut M, insns: &[Insn<F>]) {
     }
 }
 
-pub fn build_lc_trie_map<F: BenchFamily>(insns: &[Insn<F>]) -> LCTrieMap<F::TriePrefix, u32> {
-    let mut map = RTrieMap::new();
-    execute::<F, _>(&mut map, insns);
-    map.compress()
-}
-
-pub fn execute_lc_lookups<F: BenchFamily>(map: &LCTrieMap<F::TriePrefix, u32>, insns: &[Insn<F>]) {
-    for insn in insns {
-        let Insn::ExactMatch(addr, len) = insn else {
-            panic!("LCTrieMap lookup benchmarks only accept exact-match instructions");
-        };
-        // Keep the borrowed result here so the benchmark measures LCTrieMap's lookup path without
-        // an additional copy.
-        std::hint::black_box(map.get(&F::trie_prefix(*addr, *len)));
-    }
-}
 
 pub fn random_addr(rng: &mut StdRng) -> (Ipv4Addr, u8) {
     let addr: Ipv4Addr = rng.gen::<u32>().into();

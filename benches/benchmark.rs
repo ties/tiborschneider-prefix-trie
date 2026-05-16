@@ -6,7 +6,6 @@ const ITERS: usize = 100_000;
 
 use criterion::measurement::WallTime;
 use criterion::{criterion_group, criterion_main, BenchmarkGroup, Criterion, Throughput};
-use iptrie::map::RTrieMap;
 use itertools::Itertools;
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -40,26 +39,8 @@ where
     bench_one::<F, F::TreeBitmapImpl>(group, setup, run);
     bench_one::<F, F::HashMapImpl>(group, setup, run);
     bench_one::<F, F::BTreeMapImpl>(group, setup, run);
-    bench_one::<F, RTrieMap<F::TriePrefix, u32>>(group, setup, run);
 }
 
-fn bench_lookup_only<F>(
-    group: &mut BenchmarkGroup<'_, WallTime>,
-    setup: &[Insn<F>],
-    lookups: &[Insn<F>],
-) where
-    F: BenchFamily,
-{
-    group.bench_function("LCTrieMap", |b| {
-        b.iter_with_setup(
-            || build_lc_trie_map::<F>(setup),
-            |m| {
-                execute_lc_lookups::<F>(&m, lookups);
-                m
-            },
-        )
-    });
-}
 
 pub fn random_mods(c: &mut Criterion) {
     let (insn, _) = generate_random_mods_dense(1, ITERS);
@@ -77,7 +58,6 @@ pub fn random_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("random-lookup");
     group.throughput(Throughput::Elements(lookups.len() as u64));
     bench_all::<Ipv4>(&mut group, &mods, &lookups);
-    bench_lookup_only::<Ipv4>(&mut group, &mods, &lookups);
     group.finish();
 }
 
@@ -114,7 +94,6 @@ where
     let mut group = c.benchmark_group(group_name);
     group.throughput(Throughput::Elements(lookups.len() as u64));
     bench_all::<F>(&mut group, &mods, &lookups);
-    bench_lookup_only::<F>(&mut group, &mods, &lookups);
     group.finish();
 }
 
@@ -145,7 +124,6 @@ where
     let mut group = c.benchmark_group(group_name);
     group.throughput(Throughput::Elements(lookups.len() as u64));
     bench_all::<F>(&mut group, &mods, &lookups);
-    bench_lookup_only::<F>(&mut group, &mods, &lookups);
     group.finish();
 }
 
